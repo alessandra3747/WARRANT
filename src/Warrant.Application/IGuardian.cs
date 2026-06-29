@@ -41,13 +41,14 @@ public static class GuardianHeuristics
 {
     private static readonly string[] KeyHints = ["email", "emailaddress", "name", "accountnumber", "phone", "telephone", "number", "id"];
 
-    private static readonly string[] ChoiceTypes = ["Picklist", "OptionSet", "Lookup", "Customer", "Boolean", "MultiSelectPicklist", "EntityName"];
+    private static readonly string[] ChoiceTypes = ["Picklist", "OptionSet", "Lookup", "Customer", "State", "Status", "Boolean", "MultiSelectPicklist", "EntityName"];
 
     public static string? PickDupKey(IReadOnlyList<FieldMeta> fields)
     {
+        bool IsChoice(FieldMeta f) => ChoiceTypes.Any(t => f.Type.Equals(t, StringComparison.OrdinalIgnoreCase));
+
         return fields.FirstOrDefault(f =>
-            KeyHints.Any(h => f.LogicalName.Contains(h, StringComparison.OrdinalIgnoreCase))
-            && !ChoiceTypes.Any(t => f.Type.Equals(t, StringComparison.OrdinalIgnoreCase))
-        )?.LogicalName ?? fields.FirstOrDefault()?.LogicalName;
+                    KeyHints.Any(h => f.LogicalName.Contains(h, StringComparison.OrdinalIgnoreCase)) 
+                    && !IsChoice(f))?.LogicalName ?? fields.FirstOrDefault(f => !IsChoice(f))?.LogicalName;
     }
 }

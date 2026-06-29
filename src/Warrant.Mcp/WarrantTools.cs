@@ -34,42 +34,47 @@ public sealed class WarrantTools(IContractStore store, IContractVerifier verifie
         {
             try { await _trigger.TriggerAsync(a, ag, ct); } catch { }
             return Json(new GateResult("pending", false, null, [], 
-                "No valid certificate yet - certification was triggered. Willretry shortly.", null, null, null, false));
+                "No valid certificate yet - certification was triggered. Will retry shortly.", null, null, null, false));
         }
 
         var (verified, payloadJson) = await _verifier.VerifyAsync(c.Jws, ct);
         if (!verified)
         {
-            return Json(new GateResult("blocked", false, c.Verdict, [], 
+            return Json(new GateResult("blocked", false, c.Verdict, [],
                 "Contract signature could not be verified - treated as untrusted.", c.HallucinationRisk, c.ValidUntil, c.Provenance, false));
         }
-        
-        using var doc = JsonDocument.Parse(payloadJson!);
-        var signedVerdict = doc.RootElement.GetProperty("verdict").GetString();
-        if (!string.Equals(c.Verdict, signedVerdict, StringComparison.OrdinalIgnoreCase))
+
+        var signed = ParseSigned(payloadJson!);
+        if (signed == null)
         {
-            return Json(new GateResult("blocked", false, c.Verdict, [], 
-                $"Tamper detected: Database altered, signed contract verdict is '{signedVerdict}', but database shows '{c.Verdict}'.",
-                c.HallucinationRisk, c.ValidUntil, c.Provenance, false));
+            return Json(new GateResult("blocked", false, c.Verdict, [],
+                "Signed payload could not be read - treated as untrusted.", c.HallucinationRisk, c.ValidUntil, c.Provenance, false));
         }
 
-        var safetyBlock = c.Findings.Any(f => f.Severity == "High" && SafetyCategories.Contains(f.Category));
+        if (!string.Equals(c.Verdict, signed.Verdict, StringComparison.OrdinalIgnoreCase))
+        {
+            return Json(new GateResult("blocked", false, c.Verdict, [],
+                $"Tamper detected: signed verdict is '{signed.Verdict}', but database shows '{c.Verdict}'.",
+                signed.HallucinationRisk, c.ValidUntil, c.Provenance, false));
+        }
+
+        var safetyBlock = signed.Findings.Any(f => f.Severity == "High" && SafetyCategories.Contains(f.Category));
         if (safetyBlock)
         {
-            return Json(new GateResult("blocked", false, c.Verdict, [], 
-                "Blocked by a safety finding (oversharing / DLP / access).", c.HallucinationRisk, c.ValidUntil, c.Provenance, true));
+            return Json(new GateResult("blocked", false, signed.Verdict, [],
+                "Blocked by a safety finding (oversharing / DLP / access).", signed.HallucinationRisk, c.ValidUntil, c.Provenance, true));
         }
-            
-        var avoid = c.Findings
+
+        var avoid = signed.Findings
             .Where(f => f.Field != null && (f.Severity == "High" || f.Severity == "Medium"))
             .Select(f => f.Field!)
             .Distinct()
             .ToArray();
 
-        return c.Verdict switch
+        return signed.Verdict switch
         {
-            "Ready" => Json(new GateResult("full", true, "Ready", [], null, c.HallucinationRisk, c.ValidUntil, c.Provenance, true)),
-            _ => Json(new GateResult("restricted", true, c.Verdict, avoid, BuildCaveat(c.Verdict, c.Findings), c.HallucinationRisk, c.ValidUntil, c.Provenance, true))
+            "Ready" => Json(new GateResult("full", true, "Ready", [], null, signed.HallucinationRisk, c.ValidUntil, c.Provenance, true)),
+            _ => Json(new GateResult("restricted", true, signed.Verdict, avoid, BuildCaveat(signed.Verdict, signed.Findings), signed.HallucinationRisk, c.ValidUntil, c.Provenance, true))
         };
     }
 
@@ -105,8 +110,27 @@ public sealed class WarrantTools(IContractStore store, IContractVerifier verifie
         }
         return a.Replace(" ", "");
     }
-    
+
+    private static SignedContract? ParseSigned(string payloadJson)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(payloadJson);
+            var root = doc.RootElement;
+            var verdict = root.GetProperty("verdict").GetString() ?? "No";
+            var risk = root.TryGetProperty("hallucinationRisk", out var r) ? r.GetDouble() : 1.0;
+            var findings = root.TryGetProperty("findings", out var f) && f.ValueKind == JsonValueKind.Array
+                ? JsonSerializer.Deserialize<List<Finding>>(f.GetRawText(), JsonOptions) ?? []
+                : [];
+            return new SignedContract(verdict, risk, findings);
+        }
+        catch { return null; }
+    }
+
+    private sealed record SignedContract(string Verdict, double HallucinationRisk, IReadOnlyList<Finding> Findings);
+
     private static string Json(GateResult r) => JsonSerializer.Serialize(r);
+    private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
 
     private record GateResult(
         string mode, bool allowed, string? verdict,
